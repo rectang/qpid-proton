@@ -30,18 +30,43 @@
 #include <assert.h>
 #include <ctype.h>
 
+#define CFISH_USE_SHORT_NAMES
+#include "Clownfish/ByteBuf.h"
+
 #define PNI_NULL_SIZE (-1)
 
 struct pn_string_t {
   char *bytes;
   ssize_t size;       // PNI_NULL_SIZE (-1) means null
   size_t capacity;
+  ByteBuf *cfobj;
 };
+
+static ByteBuf*
+AS_CFOBJ(void *object) {
+    pn_string_t *string = (pn_string_t *)object;
+    if (string) {
+        return string->cfobj;
+    }
+    return NULL;
+}
+
+static void
+set_cfobj(void *object, ByteBuf *cfobj) {
+    pn_string_t *string = (pn_string_t *)object;
+    if (string) {
+       string->cfobj = cfobj;
+    }
+    else {
+        DECREF(cfobj);
+    }
+}
 
 static void pn_string_finalize(void *object)
 {
   pn_string_t *string = (pn_string_t *) object;
   free(string->bytes);
+  DECREF(AS_CFOBJ(string));
 }
 
 static uintptr_t pn_string_hashcode(void *object)
@@ -111,6 +136,9 @@ pn_string_t *pn_stringn(const char *bytes, size_t n)
   string->capacity = n ? n * sizeof(char) : 16;
   string->bytes = (char *) malloc(string->capacity);
   pn_string_setn(string, bytes, n);
+  cfish_bootstrap_parcel();
+  ByteBuf *cfobj = BB_new(n + 1);
+  set_cfobj(string, cfobj);
   return string;
 }
 
