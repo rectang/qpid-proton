@@ -368,7 +368,7 @@ add_library (
   ${qpid-proton-platform}
   )
 
-target_link_libraries (qpid-proton ${UUID_LIB} ${SSL_LIB} ${SASL_LIB} ${TIME_LIB} ${PLATFORM_LIBS})
+target_link_libraries (qpid-proton cfish ${UUID_LIB} ${SSL_LIB} ${SASL_LIB} ${TIME_LIB} ${PLATFORM_LIBS})
 
 set_target_properties (
   qpid-proton
