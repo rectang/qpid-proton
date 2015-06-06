@@ -33,12 +33,7 @@
 #define CFISH_USE_SHORT_NAMES
 #include "Clownfish/ByteBuf.h"
 
-#define PNI_NULL_SIZE (-1)
-
 struct pn_string_t {
-  char *bytes;
-  ssize_t size;       // PNI_NULL_SIZE (-1) means null
-  size_t capacity;
   ByteBuf *cfobj;
 };
 
@@ -62,53 +57,69 @@ set_cfobj(void *object, ByteBuf *cfobj) {
     }
 }
 
+static void
+null_terminate(ByteBuf *cfobj) {
+  BB_Cat_Bytes(cfobj, "\0", 1);
+  BB_Set_Size(cfobj, BB_Get_Size(cfobj) - 1);
+}
+
 static void pn_string_finalize(void *object)
 {
-  pn_string_t *string = (pn_string_t *) object;
-  free(string->bytes);
-  DECREF(AS_CFOBJ(string));
+  DECREF(AS_CFOBJ(object));
 }
 
 static uintptr_t pn_string_hashcode(void *object)
 {
-  pn_string_t *string = (pn_string_t *) object;
-  if (string->size == PNI_NULL_SIZE) {
+  ByteBuf *cfobj = AS_CFOBJ(object);
+  ssize_t size = (ssize_t)BB_Get_Size(cfobj);
+  const char *bytes = BB_Get_Buf(cfobj);
+
+  if (bytes == NULL) {
     return 0;
   }
 
   uintptr_t hashcode = 1;
-  for (ssize_t i = 0; i < string->size; i++) {
-    hashcode = hashcode * 31 + string->bytes[i];
+  for (ssize_t i = 0; i < size; i++) {
+    hashcode = hashcode * 31 + bytes[i];
   }
   return hashcode;
 }
 
 static intptr_t pn_string_compare(void *oa, void *ob)
 {
-  pn_string_t *a = (pn_string_t *) oa;
-  pn_string_t *b = (pn_string_t *) ob;
-  if (a->size != b->size) {
-    return b->size - a->size;
+  ByteBuf *a = AS_CFOBJ(oa);
+  ByteBuf *b = AS_CFOBJ(ob);
+  intptr_t a_size = (intptr_t)BB_Get_Size(a);
+  intptr_t b_size = (intptr_t)BB_Get_Size(b);
+
+  if (a_size != b_size) {  // Order by length then memcmp?  Seems odd.
+    return b_size - a_size;
   }
 
-  if (a->size == PNI_NULL_SIZE) {
+  const char *a_bytes = BB_Get_Buf(a);
+  const char *b_bytes = BB_Get_Buf(b);
+
+  if (a_bytes == NULL) {
     return 0;
   } else {
-    return memcmp(a->bytes, b->bytes, a->size);
+    return memcmp(a_bytes, b_bytes, a_size);
   }
 }
 
 static int pn_string_inspect(void *obj, pn_string_t *dst)
 {
-  pn_string_t *str = (pn_string_t *) obj;
-  if (str->size == PNI_NULL_SIZE) {
+  ByteBuf *cfobj = AS_CFOBJ(obj);
+  uint8_t *bytes = (uint8_t*)BB_Get_Buf(cfobj);
+  ssize_t size = (ssize_t)BB_Get_Size(cfobj);
+
+  if (bytes == NULL) {
     return pn_string_addf(dst, "null");
   }
 
-  int err = pn_string_addf(dst, "\"");
+  int err = pn_string_addf(dst, "\""); // Should return if error?
 
-  for (int i = 0; i < str->size; i++) {
-    uint8_t c = str->bytes[i];
+  for (int i = 0; i < size; i++) {
+    uint8_t c = bytes[i];
     if (isprint(c)) {
       err = pn_string_addf(dst, "%c", c);
       if (err) return err;
@@ -133,33 +144,26 @@ pn_string_t *pn_stringn(const char *bytes, size_t n)
 {
   static const pn_class_t clazz = PN_CLASS(pn_string);
   pn_string_t *string = (pn_string_t *) pn_class_new(&clazz, sizeof(pn_string_t));
-  string->capacity = n ? n * sizeof(char) : 16;
-  string->bytes = (char *) malloc(string->capacity);
-  pn_string_setn(string, bytes, n);
+
   cfish_bootstrap_parcel();
   ByteBuf *cfobj = BB_new(n + 1);
   set_cfobj(string, cfobj);
+
+  pn_string_setn(string, bytes, n);
+
   return string;
 }
 
 const char *pn_string_get(pn_string_t *string)
 {
   assert(string);
-  if (string->size == PNI_NULL_SIZE) {
-    return NULL;
-  } else {
-    return string->bytes;
-  }
+  return BB_Get_Buf(AS_CFOBJ(string));
 }
 
 size_t pn_string_size(pn_string_t *string)
 {
   assert(string);
-  if (string->size == PNI_NULL_SIZE) {
-    return 0;
-  } else {
-    return string->size;
-  }
+  return BB_Get_Size(AS_CFOBJ(string));
 }
 
 int pn_string_set(pn_string_t *string, const char *bytes)
@@ -169,21 +173,7 @@ int pn_string_set(pn_string_t *string, const char *bytes)
 
 int pn_string_grow(pn_string_t *string, size_t capacity)
 {
-  bool grow = false;
-  while (string->capacity < (capacity*sizeof(char) + 1)) {
-    string->capacity *= 2;
-    grow = true;
-  }
-
-  if (grow) {
-    char *growed = (char *) realloc(string->bytes, string->capacity);
-    if (growed) {
-      string->bytes = growed;
-    } else {
-      return PN_ERR;
-    }
-  }
-
+  BB_Grow(AS_CFOBJ(string), (capacity * sizeof(char) + 1));
   return 0;
 }
 
@@ -192,12 +182,14 @@ int pn_string_setn(pn_string_t *string, const char *bytes, size_t n)
   int err = pn_string_grow(string, n);
   if (err) return err;
 
+  ByteBuf *cfobj = AS_CFOBJ(string);
   if (bytes) {
-    memcpy(string->bytes, bytes, n*sizeof(char));
-    string->bytes[n] = '\0';
-    string->size = n;
-  } else {
-    string->size = PNI_NULL_SIZE;
+    BB_Mimic_Bytes(cfobj, bytes, n);
+    null_terminate(cfobj);
+  }
+  else {
+    // Hack to set internal buf to NULL in ByteBuf.
+    DECREF(BB_Yield_Blob(cfobj));
   }
 
   return 0;
@@ -208,16 +200,19 @@ ssize_t pn_string_put(pn_string_t *string, char *dst)
   assert(string);
   assert(dst);
 
-  if (string->size != PNI_NULL_SIZE) {
-    memcpy(dst, string->bytes, string->size + 1);
+  ByteBuf *cfobj = AS_CFOBJ(string);
+  const char *bytes = BB_Get_Buf(cfobj);
+  size_t size = BB_Get_Size(cfobj);
+  if (bytes != NULL) {
+    memcpy(dst, bytes, size + 1);
   }
 
-  return string->size;
+  return (ssize_t)size;
 }
 
 void pn_string_clear(pn_string_t *string)
 {
-  pn_string_set(string, NULL);
+  BB_Mimic_Bytes(AS_CFOBJ(string), NULL, 0);
 }
 
 int pn_string_format(pn_string_t *string, const char *format, ...)
@@ -249,21 +244,25 @@ int pn_string_addf(pn_string_t *string, const char *format, ...)
 int pn_string_vaddf(pn_string_t *string, const char *format, va_list ap)
 {
   va_list copy;
+  ByteBuf *cfobj = AS_CFOBJ(string);
 
-  if (string->size == PNI_NULL_SIZE) {
+  if (BB_Get_Buf(cfobj) == NULL) {
     return PN_ERR;
   }
 
   while (true) {
     va_copy(copy, ap);
-    int err = vsnprintf(string->bytes + string->size, string->capacity - string->size, format, copy);
+    char *bytes = BB_Get_Buf(cfobj);
+    ssize_t size = (ssize_t)BB_Get_Size(cfobj);
+    ssize_t capacity = (ssize_t)BB_Get_Capacity(cfobj);
+    int err = vsnprintf(bytes + size, capacity - size, format, copy);
     va_end(copy);
     if (err < 0) {
       return err;
-    } else if ((size_t) err >= string->capacity - string->size) {
-      pn_string_grow(string, string->size + err);
+    } else if (err >= capacity - size) {
+      pn_string_grow(string, size + err);
     } else {
-      string->size += err;
+      BB_Set_Size(cfobj, size + err);
       return 0;
     }
   }
@@ -272,13 +271,17 @@ int pn_string_vaddf(pn_string_t *string, const char *format, va_list ap)
 char *pn_string_buffer(pn_string_t *string)
 {
   assert(string);
-  return string->bytes;
+  return BB_Get_Buf(AS_CFOBJ(string));
 }
 
 size_t pn_string_capacity(pn_string_t *string)
 {
   assert(string);
-  return string->capacity - 1;
+  size_t capacity = BB_Get_Capacity(AS_CFOBJ(string));
+  if (capacity > 0) {
+    capacity -= 1;
+  }
+  return capacity;
 }
 
 int pn_string_resize(pn_string_t *string, size_t size)
@@ -286,8 +289,9 @@ int pn_string_resize(pn_string_t *string, size_t size)
   assert(string);
   int err = pn_string_grow(string, size);
   if (err) return err;
-  string->size = size;
-  string->bytes[size] = '\0';
+  ByteBuf *cfobj = AS_CFOBJ(string);
+  BB_Set_Size(cfobj, size); // may append junk to string
+  null_terminate(cfobj);
   return 0;
 }
 
